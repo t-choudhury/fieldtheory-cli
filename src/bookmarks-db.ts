@@ -466,8 +466,9 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       db.run('DROP TABLE IF EXISTS meta');
     }
 
-    initSchema(db);
+    // Upgrade existing tables before creating indexes/views that depend on new columns.
     ensureMigrations(db);
+    initSchema(db);
 
     // Preserve classification and enrichment fields when refreshing existing rows.
     // Folder fields are normally sourced from JSONL (source of truth) but we also

@@ -475,3 +475,42 @@ test('stored quote author metadata is validated before search display', async ()
     }
   }, [QUOTE_FIXTURE]);
 });
+
+test('buildIndex upgrades a pre-enrichment schema before creating dependent indexes', async () => {
+  await withIsolatedDataDir(async () => {
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      // Actual old column layout, not a current table with only its FTS downgraded.
+      db.run(`CREATE TABLE bookmarks (
+        id TEXT PRIMARY KEY, tweet_id TEXT NOT NULL, url TEXT NOT NULL, text TEXT NOT NULL,
+        author_handle TEXT, author_name TEXT, author_profile_image_url TEXT,
+        posted_at TEXT, bookmarked_at TEXT, synced_at TEXT NOT NULL,
+        conversation_id TEXT, in_reply_to_status_id TEXT, quoted_status_id TEXT, language TEXT,
+        like_count INTEGER, repost_count INTEGER, reply_count INTEGER, quote_count INTEGER,
+        bookmark_count INTEGER, view_count INTEGER, media_count INTEGER DEFAULT 0,
+        link_count INTEGER DEFAULT 0, links_json TEXT, tags_json TEXT, ingested_via TEXT,
+        categories TEXT, primary_category TEXT, github_urls TEXT
+      )`);
+      db.run('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.run("INSERT INTO meta VALUES ('schema_version', '2')");
+      db.run("CREATE VIRTUAL TABLE bookmarks_fts USING fts5(text,author_handle,author_name,content=bookmarks,content_rowid=rowid,tokenize='porter unicode61')");
+      db.run('INSERT INTO bookmarks(id,tweet_id,url,text,synced_at,categories) VALUES(?,?,?,?,?,?)', [
+        '1', '1', QUOTE_FIXTURE.url, QUOTE_FIXTURE.text, QUOTE_FIXTURE.syncedAt, 'opinion',
+      ]);
+      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      saveDb(db, dbPath);
+    } finally { db.close(); }
+    await buildIndex();
+    assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+    assert.deepEqual((await getBookmarkById('1'))?.categories, ['opinion']);
+    const reopened = await openDb(dbPath);
+    try {
+      assert.equal(reopened.exec("SELECT value FROM meta WHERE key='schema_version'")[0].values[0][0], '7');
+      assert.ok(reopened.exec('PRAGMA table_info(bookmarks)')[0].values.some(r => r[1] === 'article_text'));
+      assert.ok(reopened.exec('PRAGMA table_info(bookmarks_fts)')[0].values.some(r => r[1] === 'quoted_text'));
+    } finally { reopened.close(); }
+    await buildIndex();
+    assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+  }, [QUOTE_FIXTURE]);
+});
