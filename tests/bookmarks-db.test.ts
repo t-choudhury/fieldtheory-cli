@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress, updateQuotedTweets } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -410,4 +410,38 @@ test('reindex updates quoted terms, including missing and empty quote text', asy
     await buildIndex();
     assert.deepEqual(await searchBookmarks({ query: 'replacementquote' }), []);
   }, [QUOTE_FIXTURE]);
+});
+
+
+test('gap-filled and replaced quotes are searchable immediately without reindexing', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const first = { ...QUOTE_FIXTURE.quotedTweet, text: 'freshquoteterm' };
+    await updateQuotedTweets([{ id: '1', quotedTweet: first }]);
+    assert.equal((await searchBookmarks({ query: 'freshquoteterm' }))[0]?.id, '1');
+    assert.equal((await searchBookmarks({ query: 'quotedwriter' }))[0]?.id, '1');
+    await updateQuotedTweets([{ id: '1', quotedTweet: { ...first, text: 'replacementterm', authorHandle: 'replacementauthor', authorName: 'Replacement Name' } }]);
+    assert.deepEqual(await searchBookmarks({ query: 'freshquoteterm' }), []);
+    assert.deepEqual(await searchBookmarks({ query: 'quotedwriter' }), []);
+    assert.equal((await searchBookmarks({ query: 'replacementterm' }))[0]?.id, '1');
+    assert.equal((await searchBookmarks({ query: 'replacementauthor' }))[0]?.id, '1');
+    await updateQuotedTweets([]);
+    await updateQuotedTweets([{ id: 'missing', quotedTweet: first }]);
+    assert.deepEqual(await searchBookmarks({ query: 'freshquoteterm' }), []);
+    assert.equal((await searchBookmarks({ query: 'replacementterm' }))[0]?.id, '1');
+  });
+});
+
+test('search display preserves quoted author names without a handle', () => {
+  const r = { id: '1', url: FIXTURES[0].url, text: 'Comment', score: -1,
+    quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, authorHandle: undefined, authorName: 'Named Writer' } };
+  assert.match(formatSearchResults([r]), /Quoted Named Writer:/);
+  assert.match(formatSearchResults([{ ...r, quotedTweet: { ...r.quotedTweet, authorName: undefined } }]), /unknown author/);
+});
+
+test('search display removes terminal controls from quoted content and attribution', () => {
+  const output = formatSearchResults([{ id: '1', url: FIXTURES[0].url, text: 'Comment', score: -1,
+    quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, text: 'hello\x1b[2J\nworld', authorHandle: 'writer\x07', url: 'https://example.com/\x1b[2J' } }]);
+  assert.doesNotMatch(output, /[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
+  assert.match(output, /hello\?\[2J\?world/);
 });

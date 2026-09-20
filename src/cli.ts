@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sanitizeForDisplay } from './display.js';
 import { Command, InvalidArgumentError, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
@@ -637,9 +638,7 @@ function requireIndex(): boolean {
  * could set a folder name that wipes the terminal or injects escape codes.
  * Replacement character keeps lengths roughly stable for padding.
  */
-export function sanitizeForDisplay(value: string): string {
-  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
-}
+export { sanitizeForDisplay } from './display.js';
 
 function formatQuotedTweetLines(quoted: QuotedTweetSnapshot): string[] {
   const author = quoted.authorHandle ? `@${quoted.authorHandle}` : (quoted.authorName ?? 'quoted tweet');

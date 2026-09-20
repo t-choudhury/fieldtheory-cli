@@ -1,3 +1,4 @@
+import { sanitizeForDisplay } from './display.js';
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
@@ -1169,16 +1170,19 @@ export { type Database } from 'sql.js';
 export async function updateQuotedTweets(
   records: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }>,
 ): Promise<void> {
+  if (!records.length) return;
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
 
   try {
+    ensureMigrations(db);
     const stmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
     for (const record of records) {
       stmt.run([JSON.stringify(record.quotedTweet), record.id]);
     }
     stmt.free();
+    // Quote fields participate in the external-content index, just like text.
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
   } finally {
     db.close();
@@ -1248,7 +1252,7 @@ export function formatSearchResults(results: SearchResult[]): string {
       const id = r.id;
       const quoted = r.quotedTweet;
       const quote = quoted
-        ? `\n   Quoted ${quoted.authorHandle ? '@' + quoted.authorHandle : 'unknown author'}: ${quoted.text.length > 140 ? quoted.text.slice(0, 140) + '...' : quoted.text}\n   ${quoted.url}`
+        ? `\n   Quoted ${sanitizeForDisplay(quoted.authorHandle ? '@' + quoted.authorHandle : (quoted.authorName || 'unknown author'))}: ${sanitizeForDisplay(quoted.text.length > 140 ? quoted.text.slice(0, 140) + '...' : quoted.text)}\n   ${sanitizeForDisplay(quoted.url)}`
         : '';
       return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}${quote}`;
     })
