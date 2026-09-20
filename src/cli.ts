@@ -1198,7 +1198,7 @@ export function buildCli() {
   program
     .command('search')
     .description('Full-text search across bookmarks')
-    .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
+    .argument('<query>', 'Literal terms (all must match; Boolean operators and phrase syntax are not supported)')
     .option('--author <handle>', 'Filter by author handle')
     .option('--after <date>', 'Bookmarks posted after this date (YYYY-MM-DD)')
     .option('--before <date>', 'Bookmarks posted before this date (YYYY-MM-DD)')

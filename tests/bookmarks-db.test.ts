@@ -333,3 +333,81 @@ test('sanitizeFtsQuery: strips internal quotes to avoid double-escaping', () => 
   // Internal quotes stripped; term wrapped once
   assert.ok(!result.includes('""'));
 });
+
+test('search ranks stronger matches ahead of insertion order with real BM25 scores', async () => {
+  const fixtures = [
+    { ...FIXTURES[0], text: 'nebula ' + 'background '.repeat(80) },
+    { ...FIXTURES[1], text: 'nebula nebula nebula' },
+    { ...FIXTURES[2], text: 'unrelated document' },
+  ];
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: 'nebula', limit: 2 });
+    assert.deepEqual(results.map(r => r.id), ['2', '1']);
+    assert.ok(results[0].score < results[1].score);
+    assert.ok(results.every(r => Number.isFinite(r.score) && r.score < 0));
+    assert.deepEqual((await searchBookmarks({ query: 'nebula', author: 'alice' })).map(r => r.id), ['1']);
+  }, fixtures);
+});
+
+const QUOTE_FIXTURE = {
+  ...FIXTURES[0], text: 'A critical response', quotedStatusId: '55',
+  quotedTweet: { id: '55', text: 'quasarprob programming language', authorHandle: 'quotedwriter', authorName: 'Quoted Writer', url: 'https://x.com/quotedwriter/status/55' },
+};
+
+test('quote-only hits retain both speakers and show the quoted source', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    for (const query of ['quasarprob', 'quotedwriter']) {
+      const results = await searchBookmarks({ query });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].authorHandle, 'alice');
+      assert.equal(results[0].text, 'A critical response');
+      assert.deepEqual(results[0].quotedTweet, QUOTE_FIXTURE.quotedTweet);
+      assert.match(formatSearchResults(results), /Quoted @quotedwriter/);
+      assert.match(formatSearchResults(results), /quasarprob programming language/);
+      assert.match(formatSearchResults(results), /https:\/\/x.com\/quotedwriter\/status\/55/);
+    }
+    assert.deepEqual(await searchBookmarks({ query: 'quasarprob', author: 'quotedwriter' }), []);
+    assert.deepEqual((await searchBookmarks({ query: 'quasarprob', author: 'alice' })).map(r => r.id), ['1']);
+  }, [QUOTE_FIXTURE]);
+});
+
+test('legacy index gains quoted terms without changing original rows or indexing JSON metadata', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    db.run('DROP TABLE bookmarks_fts');
+    db.run("CREATE VIRTUAL TABLE bookmarks_fts USING fts5(text,author_handle,author_name,article_text,content=bookmarks,content_rowid=rowid,tokenize='porter unicode61')");
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    db.run("REPLACE INTO meta VALUES('schema_version','6')");
+    db.run("UPDATE bookmarks SET categories='opinion', article_text='archivalcontext' WHERE id='1'");
+    db.run("UPDATE bookmarks SET quoted_tweet_json='not json' WHERE id='2'");
+    db.run("UPDATE bookmarks SET quoted_tweet_json='null' WHERE id='3'");
+    saveDb(db, dbPath); db.close();
+    assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+    assert.equal((await searchBookmarks({ query: 'archivalcontext' }))[0]?.id, '1');
+    assert.deepEqual(await searchBookmarks({ query: 'hiddenprofiletoken' }), []);
+    await buildIndex();
+    const reopened = await openDb(dbPath);
+    assert.equal(reopened.exec("SELECT categories FROM bookmarks WHERE id='1'")[0].values[0][0], 'opinion');
+    assert.ok(reopened.exec('PRAGMA table_info(bookmarks_fts)')[0].values.some(r => r[1] === 'quoted_text'));
+    reopened.close();
+    assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+  }, [{ ...QUOTE_FIXTURE, quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, authorProfileImageUrl: 'https://hiddenprofiletoken.invalid/avatar' } }, FIXTURES[1], FIXTURES[2]]);
+});
+
+test('reindex updates quoted terms, including missing and empty quote text', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    assert.equal((await searchBookmarks({ query: 'quasarprob' })).length, 1);
+    await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), JSON.stringify({ ...QUOTE_FIXTURE, quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, text: 'replacementquote' } }) + '\n');
+    await buildIndex();
+    assert.deepEqual(await searchBookmarks({ query: 'quasarprob' }), []);
+    assert.equal((await searchBookmarks({ query: 'replacementquote' })).length, 1);
+    await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), JSON.stringify({ ...QUOTE_FIXTURE, quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, text: '' } }) + '\n');
+    await buildIndex();
+    assert.deepEqual(await searchBookmarks({ query: 'replacementquote' }), []);
+  }, [QUOTE_FIXTURE]);
+});

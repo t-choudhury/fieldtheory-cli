@@ -7,7 +7,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export interface SearchResult {
   id: string;
@@ -17,6 +17,7 @@ export interface SearchResult {
   authorName?: string;
   postedAt?: string | null;
   score: number;
+  quotedTweet?: QuotedTweetSnapshot | null;
 }
 
 export interface SearchOptions {
@@ -280,17 +281,32 @@ function initSchema(db: Database): void {
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)`);
 
-  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-    text,
-    author_handle,
-    author_name,
-    article_text,
-    content=bookmarks,
-    content_rowid=rowid,
-    tokenize='porter unicode61'
-  )`);
+  createSearchIndex(db);
 
   db.run("REPLACE INTO meta VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)]);
+}
+
+// A view keeps derived quote fields out of the stored bookmark schema and
+// preserves attribution without indexing URLs, media metadata, or JSON keys.
+function createSearchIndex(db: Database): void {
+  db.run(`CREATE VIEW IF NOT EXISTS bookmarks_search_content AS
+    SELECT rowid, text, author_handle, author_name, article_text,
+      CASE WHEN json_valid(quoted_tweet_json) THEN
+        CASE WHEN json_type(quoted_tweet_json, '$.text') = 'text'
+          THEN json_extract(quoted_tweet_json, '$.text') END END AS quoted_text,
+      CASE WHEN json_valid(quoted_tweet_json) THEN
+        CASE WHEN json_type(quoted_tweet_json, '$.authorHandle') = 'text'
+          THEN json_extract(quoted_tweet_json, '$.authorHandle') END END AS quoted_author_handle,
+      CASE WHEN json_valid(quoted_tweet_json) THEN
+        CASE WHEN json_type(quoted_tweet_json, '$.authorName') = 'text'
+          THEN json_extract(quoted_tweet_json, '$.authorName') END END AS quoted_author_name
+    FROM bookmarks`);
+  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+    text, author_handle, author_name, article_text,
+    quoted_text, quoted_author_handle, quoted_author_name,
+    content=bookmarks_search_content, content_rowid=rowid,
+    tokenize='porter unicode61'
+  )`);
 }
 
 function columnExists(db: Database, table: string, column: string): boolean {
@@ -346,15 +362,12 @@ function ensureMigrations(db: Database): void {
     ensureColumn(db, 'bookmarks', 'folder_ids', 'TEXT');
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
 
-    // FTS rebuild: only if the FTS table is missing the article_text column.
-    // Check via a zero-row SELECT so we don't rebuild unnecessarily.
-    if (!ftsHasColumn(db, 'article_text')) {
+    // Inspect the real schema: old indexes need a rebuild even if meta is ahead.
+    if (!['article_text', 'quoted_text', 'quoted_author_handle', 'quoted_author_name'].every(
+      column => ftsHasColumn(db, column)
+    )) {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
-      db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-        text, author_handle, author_name, article_text,
-        content=bookmarks, content_rowid=rowid,
-        tokenize='porter unicode61'
-      )`);
+      createSearchIndex(db);
       db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     }
   }
@@ -539,15 +552,15 @@ export function sanitizeFtsQuery(query: string): string {
 export async function searchBookmarks(options: SearchOptions): Promise<SearchResult[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
   const limit = options.limit ?? 20;
 
   try {
+    ensureMigrations(db);
     const conditions: string[] = [];
     const params: any[] = [];
 
     if (options.query) {
-      conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
+      conditions.push(`bookmarks_fts MATCH ?`);
       params.push(sanitizeFtsQuery(options.query));
     }
     if (options.author) {
@@ -567,7 +580,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 5.0, 1.0, 1.0) ASC, b.rowid ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
@@ -575,7 +588,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.query) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 5.0, 1.0, 1.0) as score, b.quoted_tweet_json
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -585,7 +598,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     } else {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               0 as score
+               0 as score, b.quoted_tweet_json
         FROM bookmarks b
         ${where}
         ORDER BY b.posted_at DESC
@@ -600,7 +613,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     } catch (err) {
       const msg = (err as Error).message ?? '';
       if (msg.includes('fts5') || msg.includes('MATCH') || msg.includes('syntax')) {
-        throw new Error(`Invalid search query: "${options.query}". Try simpler terms or wrap phrases in double quotes.`);
+        throw new Error(`Invalid search query: "${options.query}". Use plain search terms; Boolean operators and phrase syntax are treated literally.`);
       }
       throw err;
     }
@@ -614,6 +627,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
       authorName: row[4] as string | undefined,
       postedAt: row[5] as string | null,
       score: row[6] as number,
+      quotedTweet: parseQuotedTweet(row[7]),
     }));
   } finally {
     db.close();
@@ -1232,7 +1246,11 @@ export function formatSearchResults(results: SearchResult[]): string {
       const date = r.postedAt ? r.postedAt.slice(0, 10) : '?';
       const text = r.text.length > 140 ? r.text.slice(0, 140) + '...' : r.text;
       const id = r.id;
-      return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}`;
+      const quoted = r.quotedTweet;
+      const quote = quoted
+        ? `\n   Quoted ${quoted.authorHandle ? '@' + quoted.authorHandle : 'unknown author'}: ${quoted.text.length > 140 ? quoted.text.slice(0, 140) + '...' : quoted.text}\n   ${quoted.url}`
+        : '';
+      return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}${quote}`;
     })
     .join('\n\n');
 }
