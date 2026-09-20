@@ -445,3 +445,33 @@ test('search display removes terminal controls from quoted content and attributi
   assert.doesNotMatch(output, /[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
   assert.match(output, /hello\?\[2J\?world/);
 });
+
+test('stored quote author metadata is validated before search display', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const cases = [
+      { authorHandle: undefined, authorName: 42, label: 'unknown author' },
+      { authorHandle: false, authorName: { name: 'Not a string' }, label: 'unknown author' },
+      { authorHandle: null, authorName: ['Not a string'], label: 'unknown author' },
+      { authorHandle: { handle: 'Not a string' }, authorName: 'Named Writer', label: 'Named Writer' },
+      { authorHandle: ['Not a string'], authorName: null, label: 'unknown author' },
+      { authorHandle: 'validhandle', authorName: true, label: '@validhandle' },
+    ];
+    for (const { authorHandle, authorName, label } of cases) {
+      const dbPath = twitterBookmarksIndexPath();
+      const db = await openDb(dbPath);
+      try {
+        db.run('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?', [
+          JSON.stringify({ ...QUOTE_FIXTURE.quotedTweet, authorHandle, authorName }), '1',
+        ]);
+        saveDb(db, dbPath);
+      } finally { db.close(); }
+      const results = await searchBookmarks({ query: 'quasarprob' });
+      assert.equal(results.length, 1);
+      assert.doesNotThrow(() => formatSearchResults(results));
+      assert.equal(results[0].quotedTweet?.authorHandle, typeof authorHandle === 'string' ? authorHandle : undefined);
+      assert.equal(results[0].quotedTweet?.authorName, typeof authorName === 'string' ? authorName : undefined);
+      assert.ok(formatSearchResults(results).includes(`Quoted ${label}:`));
+    }
+  }, [QUOTE_FIXTURE]);
+});
