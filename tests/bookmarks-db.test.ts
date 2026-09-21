@@ -563,3 +563,18 @@ test('existing quote indexes rebuild when snapshot validation changes, even with
     assert.deepEqual(await searchBookmarks({ query: 'phantomauthor' }), []);
   }, [QUOTE_FIXTURE, FIXTURES[1]]);
 });
+
+test('stored quote dates cannot crash display while valid dates and quotes are preserved', async () => {
+  for (const postedAt of [42, true, {}, [], null, undefined, '', '2026-09-21T00:00:00Z']) {
+    await withIsolatedDataDir(async () => {
+      await buildIndex();
+      const quote = (await getBookmarkById('1'))?.quotedTweet;
+      assert.ok(quote);
+      assert.equal(quote.text, QUOTE_FIXTURE.quotedTweet.text);
+      assert.ok(quote.postedAt == null || typeof quote.postedAt === 'string');
+      assert.doesNotThrow(() => quote.postedAt ? quote.postedAt.slice(0, 10) : '');
+      if (typeof postedAt === 'string') assert.equal(quote.postedAt, postedAt);
+      assert.equal((await searchBookmarks({ query: 'quasarprob' })).length, 1);
+    }, [{ ...QUOTE_FIXTURE, quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, postedAt } }]);
+  }
+});

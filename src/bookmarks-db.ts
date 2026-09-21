@@ -101,9 +101,11 @@ function parseQuotedTweet(value: unknown): QuotedTweetSnapshot | null {
     if (!parsed || typeof parsed !== 'object') return null;
     if (typeof parsed.id !== 'string' || typeof parsed.text !== 'string' || typeof parsed.url !== 'string') return null;
     // Stored JSON is not guaranteed to respect the optional TypeScript fields.
-    // Keep a usable quote while discarding invalid attribution values.
+    // Keep a usable quote while discarding invalid optional display metadata.
+    const { postedAt, ...snapshot } = parsed;
     return {
-      ...parsed,
+      ...snapshot,
+      ...(postedAt === null || typeof postedAt === 'string' ? { postedAt } : {}),
       authorHandle: typeof parsed.authorHandle === 'string' ? parsed.authorHandle : undefined,
       authorName: typeof parsed.authorName === 'string' ? parsed.authorName : undefined,
     } as QuotedTweetSnapshot;
