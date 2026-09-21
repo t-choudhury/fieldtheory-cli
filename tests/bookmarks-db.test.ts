@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress, updateQuotedTweets } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress, updateQuotedTweets, updateBookmarkContent } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -608,6 +608,43 @@ test('repeated searches do not rebuild an index persisted by buildIndex', async 
         assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
       }
       assert.deepEqual(rebuilds, [], 'persisted migrations must avoid corpus-wide work on each search');
+    } finally { spy.mock.restore(); }
+  }, [QUOTE_FIXTURE]);
+});
+
+
+for (const legacy of [false, true]) test(`gap-fill batches quote and text updates into one rebuild (legacy=${legacy})`, async (t) => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const db = await openDb(twitterBookmarksIndexPath());
+    if (legacy) {
+      db.run('DROP TABLE bookmarks_fts');
+      db.run('DROP VIEW bookmarks_search_content');
+      db.run("CREATE VIRTUAL TABLE bookmarks_fts USING fts5(text,author_handle,author_name,article_text,content=bookmarks,content_rowid=rowid)");
+      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      saveDb(db, twitterBookmarksIndexPath());
+    }
+    const prototype = Object.getPrototypeOf(db);
+    const run = prototype.run;
+    db.close();
+    let rebuilds = 0;
+    const spy = t.mock.method(prototype, 'run', function (this: unknown, sql: string, ...args: unknown[]) {
+      if (/\brebuild\b/i.test(sql)) rebuilds++;
+      return run.apply(this, [sql, ...args]);
+    });
+    try {
+      await updateBookmarkContent({
+        quotes: [{ id: '1', quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, text: 'batchquote' } }],
+        texts: [{ id: '1', text: 'batchoriginal' }],
+      });
+      assert.equal(rebuilds, 1);
+      assert.equal((await searchBookmarks({ query: 'batchquote' }))[0]?.id, '1');
+      assert.equal((await searchBookmarks({ query: 'batchoriginal' }))[0]?.id, '1');
+      assert.deepEqual(await searchBookmarks({ query: 'quasarprob' }), []);
+      assert.deepEqual(await searchBookmarks({ query: 'critical' }), []);
+      await updateBookmarkContent({});
+      await updateBookmarkContent({ quotes: [], texts: [] });
+      assert.equal(rebuilds, 1);
     } finally { spy.mock.restore(); }
   }, [QUOTE_FIXTURE]);
 });

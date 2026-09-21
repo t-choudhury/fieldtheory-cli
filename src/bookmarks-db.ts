@@ -347,7 +347,7 @@ function ftsHasColumn(db: Database, column: string): boolean {
   }
 }
 
-function ensureMigrations(db: Database): void {
+function ensureMigrations(db: Database, rebuildSearchIndex = true): void {
   // Ensure meta table exists (may not on a fresh/empty DB)
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
 
@@ -383,7 +383,7 @@ function ensureMigrations(db: Database): void {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
       db.run('DROP VIEW IF EXISTS bookmarks_search_content');
       createSearchIndex(db);
-      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      if (rebuildSearchIndex) db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     }
   }
 
@@ -1185,44 +1185,37 @@ export { type Database } from 'sql.js';
 export async function updateQuotedTweets(
   records: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }>,
 ): Promise<void> {
-  if (!records.length) return;
-  const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
-
-  try {
-    ensureMigrations(db);
-    const stmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
-    for (const record of records) {
-      stmt.run([JSON.stringify(record.quotedTweet), record.id]);
-    }
-    stmt.free();
-    // Quote fields participate in the external-content index, just like text.
-    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
-    saveDb(db, dbPath);
-  } finally {
-    db.close();
-  }
+  await updateBookmarkContent({ quotes: records });
 }
 
 export async function updateBookmarkText(
   records: Array<{ id: string; text: string }>,
 ): Promise<void> {
+  await updateBookmarkContent({ texts: records });
+}
+
+export async function updateBookmarkContent(updates: {
+  quotes?: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }>;
+  texts?: Array<{ id: string; text: string }>;
+}): Promise<void> {
+  const { quotes = [], texts = [] } = updates;
+  if (!quotes.length && !texts.length) return;
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
-
   try {
-    const stmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
-    for (const record of records) {
-      stmt.run([record.text, record.id]);
-    }
-    stmt.free();
-    // Rebuild FTS to reflect updated text
+    // This write rebuilds once after all updates, including any schema upgrade.
+    ensureMigrations(db, false);
+    const quoteStmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
+    try {
+      for (const record of quotes) quoteStmt.run([JSON.stringify(record.quotedTweet), record.id]);
+    } finally { quoteStmt.free(); }
+    const textStmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    try {
+      for (const record of texts) textStmt.run([record.text, record.id]);
+    } finally { textStmt.free(); }
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
-  } finally {
-    db.close();
-  }
+  } finally { db.close(); }
 }
 
 export interface ArticleUpdate {
