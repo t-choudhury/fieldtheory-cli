@@ -506,11 +506,60 @@ test('buildIndex upgrades a pre-enrichment schema before creating dependent inde
     assert.deepEqual((await getBookmarkById('1'))?.categories, ['opinion']);
     const reopened = await openDb(dbPath);
     try {
-      assert.equal(reopened.exec("SELECT value FROM meta WHERE key='schema_version'")[0].values[0][0], '7');
+      assert.equal(reopened.exec("SELECT value FROM meta WHERE key='schema_version'")[0].values[0][0], '8');
       assert.ok(reopened.exec('PRAGMA table_info(bookmarks)')[0].values.some(r => r[1] === 'article_text'));
       assert.ok(reopened.exec('PRAGMA table_info(bookmarks_fts)')[0].values.some(r => r[1] === 'quoted_text'));
     } finally { reopened.close(); }
     await buildIndex();
     assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
   }, [QUOTE_FIXTURE]);
+});
+
+test('invalid quote snapshots cannot produce hits with no displayable source', async () => {
+  const invalidQuotes = [
+    { text: 'phantomquote', authorHandle: 'phantomauthor', url: 'https://example.com' },
+    { id: '55', text: 'phantomquote', authorName: 'phantomauthor', url: 42 },
+    { id: '55', text: null, authorHandle: 'phantomauthor', url: 'https://example.com' },
+  ];
+  for (const quotedTweet of invalidQuotes) {
+    await withIsolatedDataDir(async () => {
+      await buildIndex();
+      assert.deepEqual(await searchBookmarks({ query: 'phantomquote' }), []);
+      assert.deepEqual(await searchBookmarks({ query: 'phantomauthor' }), []);
+      const original = await searchBookmarks({ query: 'critical' });
+      assert.equal(original.length, 1);
+      assert.equal(original[0].quotedTweet, null);
+    }, [{ ...QUOTE_FIXTURE, quotedTweet }]);
+  }
+});
+
+test('existing quote indexes rebuild when snapshot validation changes, even with current metadata', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run('DROP VIEW bookmarks_search_content');
+      db.run(`CREATE VIEW bookmarks_search_content AS
+        SELECT rowid, text, author_handle, author_name, article_text,
+          json_extract(quoted_tweet_json, '$.text') AS quoted_text,
+          json_extract(quoted_tweet_json, '$.authorHandle') AS quoted_author_handle,
+          json_extract(quoted_tweet_json, '$.authorName') AS quoted_author_name
+        FROM bookmarks`);
+      db.run('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?', [
+        JSON.stringify({ text: 'phantomquote', authorHandle: 'phantomauthor' }), '2',
+      ]);
+      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      saveDb(db, dbPath);
+    } finally { db.close(); }
+    assert.deepEqual(await searchBookmarks({ query: 'phantomquote' }), []);
+    assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+    assert.equal((await searchBookmarks({ query: 'Rust' }))[0]?.id, '2');
+    await buildIndex();
+    const reopened = await openDb(dbPath);
+    try {
+      assert.ok(reopened.exec('PRAGMA table_info(bookmarks_search_content)')[0].values.some(r => r[1] === 'valid_quote_json'));
+    } finally { reopened.close(); }
+    assert.deepEqual(await searchBookmarks({ query: 'phantomauthor' }), []);
+  }, [QUOTE_FIXTURE, FIXTURES[1]]);
 });

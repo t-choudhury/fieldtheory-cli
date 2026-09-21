@@ -8,7 +8,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export interface SearchResult {
   id: string;
@@ -295,19 +295,23 @@ function initSchema(db: Database): void {
 
 // A view keeps derived quote fields out of the stored bookmark schema and
 // preserves attribution without indexing URLs, media metadata, or JSON keys.
+// Match parseQuotedTweet validation so every indexed quote can be displayed.
 function createSearchIndex(db: Database): void {
   db.run(`CREATE VIEW IF NOT EXISTS bookmarks_search_content AS
-    SELECT rowid, text, author_handle, author_name, article_text,
-      CASE WHEN json_valid(quoted_tweet_json) THEN
-        CASE WHEN json_type(quoted_tweet_json, '$.text') = 'text'
-          THEN json_extract(quoted_tweet_json, '$.text') END END AS quoted_text,
-      CASE WHEN json_valid(quoted_tweet_json) THEN
-        CASE WHEN json_type(quoted_tweet_json, '$.authorHandle') = 'text'
-          THEN json_extract(quoted_tweet_json, '$.authorHandle') END END AS quoted_author_handle,
-      CASE WHEN json_valid(quoted_tweet_json) THEN
-        CASE WHEN json_type(quoted_tweet_json, '$.authorName') = 'text'
-          THEN json_extract(quoted_tweet_json, '$.authorName') END END AS quoted_author_name
-    FROM bookmarks`);
+    SELECT rowid, text, author_handle, author_name, article_text, valid_quote_json,
+      json_extract(valid_quote_json, '$.text') AS quoted_text,
+      CASE WHEN json_type(valid_quote_json, '$.authorHandle') = 'text'
+        THEN json_extract(valid_quote_json, '$.authorHandle') END AS quoted_author_handle,
+      CASE WHEN json_type(valid_quote_json, '$.authorName') = 'text'
+        THEN json_extract(valid_quote_json, '$.authorName') END AS quoted_author_name
+    FROM (
+      SELECT rowid, *, CASE WHEN json_valid(quoted_tweet_json) THEN
+        CASE WHEN json_type(quoted_tweet_json, '$.id') = 'text'
+          AND json_type(quoted_tweet_json, '$.text') = 'text'
+          AND json_type(quoted_tweet_json, '$.url') = 'text'
+          THEN quoted_tweet_json END END AS valid_quote_json
+      FROM bookmarks
+    )`);
   db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
     text, author_handle, author_name, article_text,
     quoted_text, quoted_author_handle, quoted_author_name,
@@ -370,10 +374,12 @@ function ensureMigrations(db: Database): void {
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
 
     // Inspect the real schema: old indexes need a rebuild even if meta is ahead.
-    if (!['article_text', 'quoted_text', 'quoted_author_handle', 'quoted_author_name'].every(
+    if (!columnExists(db, 'bookmarks_search_content', 'valid_quote_json') ||
+      !['article_text', 'quoted_text', 'quoted_author_handle', 'quoted_author_name'].every(
       column => ftsHasColumn(db, column)
     )) {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
+      db.run('DROP VIEW IF EXISTS bookmarks_search_content');
       createSearchIndex(db);
       db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     }

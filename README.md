@@ -75,7 +75,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft domains`              | Subject domain distribution                                              |
 | `ft folders`              | Show X bookmark folder distribution (requires `ft sync --folders` first) |
 
-Search matches all supplied terms across post text, authors, article text, and quoted-post text/authors. Boolean operators and exact-phrase syntax are treated as literal terms, not query operators. Results rank by BM25 and keep the original post and quoted author/text separate, including in `--json` output. `--author` filters the original poster.
+Search matches all supplied terms across post text, authors, article text, and quoted-post text/authors. Boolean operators and exact-phrase syntax are treated as literal terms, not query operators. Results rank by BM25 and keep the original post and quoted author/text separate, including in `--json` output. `--author` filters the original poster. Malformed quote snapshots without string ID, text, and URL fields do not contribute search terms; the original post remains searchable.
 
 Existing indexes are upgraded in memory when opened. Run `ft index` to persist the quote-aware index; this preserves bookmark rows and enrichment. No resync or model call is required.
 
