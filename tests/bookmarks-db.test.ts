@@ -578,3 +578,36 @@ test('stored quote dates cannot crash display while valid dates and quotes are p
     }, [{ ...QUOTE_FIXTURE, quotedTweet: { ...QUOTE_FIXTURE.quotedTweet, postedAt } }]);
   }
 });
+
+test('search display sanitizes original-post fields as well as quoted content', () => {
+  const output = formatSearchResults([{
+    id: '1\x07', url: 'https://example.com/\x1b[2J', text: 'original\nforged line',
+    authorHandle: 'writer\x1b[2J', postedAt: '2026\x07-09-21', score: -1,
+    quotedTweet: QUOTE_FIXTURE.quotedTweet,
+  }]);
+  assert.doesNotMatch(output, /[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
+  assert.ok(output.includes('original?forged line'));
+  assert.ok(output.includes('Quoted @quotedwriter:'));
+  assert.equal(output.split('\n').length, 5);
+});
+
+test('repeated searches do not rebuild an index persisted by buildIndex', async (t) => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const db = await openDb(twitterBookmarksIndexPath());
+    const prototype = Object.getPrototypeOf(db);
+    const run = prototype.run;
+    db.close();
+    const rebuilds: string[] = [];
+    const spy = t.mock.method(prototype, 'run', function (this: unknown, sql: string, ...args: unknown[]) {
+      if (/\brebuild\b/i.test(sql)) rebuilds.push(sql);
+      return run.apply(this, [sql, ...args]);
+    });
+    try {
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await searchBookmarks({ query: 'quasarprob' }))[0]?.id, '1');
+      }
+      assert.deepEqual(rebuilds, [], 'persisted migrations must avoid corpus-wide work on each search');
+    } finally { spy.mock.restore(); }
+  }, [QUOTE_FIXTURE]);
+});

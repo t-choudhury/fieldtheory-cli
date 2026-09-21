@@ -1269,7 +1269,7 @@ export function formatSearchResults(results: SearchResult[]): string {
       const quote = quoted
         ? `\n   Quoted ${sanitizeForDisplay(quoted.authorHandle ? '@' + quoted.authorHandle : (quoted.authorName || 'unknown author'))}: ${sanitizeForDisplay(quoted.text.length > 140 ? quoted.text.slice(0, 140) + '...' : quoted.text)}\n   ${sanitizeForDisplay(quoted.url)}`
         : '';
-      return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}${quote}`;
+      return `${i + 1}. [${sanitizeForDisplay(date)}] ${sanitizeForDisplay(author)} (ID: ${sanitizeForDisplay(id)})\n   ${sanitizeForDisplay(text)}\n   ${sanitizeForDisplay(r.url)}${quote}`;
     })
     .join('\n\n');
 }
